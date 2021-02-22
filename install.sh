@@ -6,10 +6,6 @@ nvm_has() {
   type "$1" > /dev/null 2>&1
 }
 
-nvm_grep() {
-  GREP_OPTIONS='' command grep "$@"
-}
-
 nvm_default_install_dir() {
   [ -z "${XDG_CONFIG_HOME-}" ] && printf %s "${HOME}/.nvm" || printf %s "${XDG_CONFIG_HOME}/nvm"
 }
@@ -46,23 +42,17 @@ nvm_profile_is_bash_or_zsh() {
 # NVM_SOURCE always takes precedence unless the method is "script-nvm-exec"
 #
 nvm_source() {
-  local NVM_GITHUB_REPO
-  NVM_GITHUB_REPO="${NVM_INSTALL_GITHUB_REPO:-nvm-sh/nvm}"
-  local NVM_VERSION
-  NVM_VERSION="${NVM_INSTALL_VERSION:-$(nvm_latest_version)}"
   local NVM_METHOD
   NVM_METHOD="$1"
   local NVM_SOURCE_URL
   NVM_SOURCE_URL="$NVM_SOURCE"
   if [ "_$NVM_METHOD" = "_script-nvm-exec" ]; then
-    NVM_SOURCE_URL="https://raw.githubusercontent.com/${NVM_GITHUB_REPO}/${NVM_VERSION}/nvm-exec"
+    NVM_SOURCE_URL="https://raw.githubusercontent.com/nvm-sh/nvm/$(nvm_latest_version)/nvm-exec"
   elif [ "_$NVM_METHOD" = "_script-nvm-bash-completion" ]; then
-    NVM_SOURCE_URL="https://raw.githubusercontent.com/${NVM_GITHUB_REPO}/${NVM_VERSION}/bash_completion"
+    NVM_SOURCE_URL="https://raw.githubusercontent.com/nvm-sh/nvm/$(nvm_latest_version)/bash_completion"
   elif [ -z "$NVM_SOURCE_URL" ]; then
     if [ "_$NVM_METHOD" = "_script" ]; then
-      NVM_SOURCE_URL="https://raw.githubusercontent.com/${NVM_GITHUB_REPO}/${NVM_VERSION}/nvm.sh"
-    elif [ "_$NVM_METHOD" = "_git" ] || [ -z "$NVM_METHOD" ]; then
-      NVM_SOURCE_URL="https://github.com/${NVM_GITHUB_REPO}.git"
+      NVM_SOURCE_URL="https://raw.githubusercontent.com/nvm-sh/nvm/$(nvm_latest_version)/nvm.sh"
     else
       echo >&2 "Unexpected value \"$NVM_METHOD\" for \$NVM_METHOD"
       return 1
@@ -80,16 +70,14 @@ nvm_node_version() {
 
 nvm_download() {
   if nvm_has "curl"; then
-    curl --fail --compressed -q "$@"
+    curl --compressed -q "$@"
   elif nvm_has "wget"; then
     # Emulate curl with wget
-    ARGS=$(nvm_echo "$@" | command sed -e 's/--progress-bar /--progress=bar /' \
-                            -e 's/--compressed //' \
-                            -e 's/--fail //' \
+    ARGS=$(echo "$*" | command sed -e 's/--progress-bar /--progress=bar /' \
                             -e 's/-L //' \
+                            -e 's/--compressed //' \
                             -e 's/-I /--server-response /' \
                             -e 's/-s /-q /' \
-                            -e 's/-sS /-nv /' \
                             -e 's/-o /-O /' \
                             -e 's/-C - /-c /')
     # shellcheck disable=SC2086
@@ -100,32 +88,20 @@ nvm_download() {
 install_nvm_from_git() {
   local INSTALL_DIR
   INSTALL_DIR="$(nvm_install_dir)"
-  local NVM_VERSION
-  NVM_VERSION="${NVM_INSTALL_VERSION:-$(nvm_latest_version)}"
-  if [ -n "${NVM_INSTALL_VERSION:-}" ]; then
-    # Check if version is an existing ref
-    if command git ls-remote "$(nvm_source "git")" "$NVM_VERSION" | nvm_grep -q "$NVM_VERSION" ; then
-      :
-    # Check if version is an existing changeset
-    elif ! nvm_download -o /dev/null "$(nvm_source "script-nvm-exec")"; then
-      echo >&2 "Failed to find '$NVM_VERSION' version."
-      exit 1
-    fi
-  fi
 
-  local fetch_error
   if [ -d "$INSTALL_DIR/.git" ]; then
-    # Updating repo
     echo "=> nvm is already installed in $INSTALL_DIR, trying to update using git"
     command printf '\r=> '
-    fetch_error="Failed to update nvm with $NVM_VERSION, run 'git fetch' in $INSTALL_DIR yourself."
+    command git --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" fetch origin tag "$(nvm_latest_version)" --depth=1 2> /dev/null || {
+      echo >&2 "Failed to update nvm, run 'git fetch' in $INSTALL_DIR yourself."
+      exit 1
+    }
   else
-    fetch_error="Failed to fetch origin with $NVM_VERSION. Please report this!"
+    # Cloning to $INSTALL_DIR
     echo "=> Downloading nvm from git to '$INSTALL_DIR'"
     command printf '\r=> '
     mkdir -p "${INSTALL_DIR}"
     if [ "$(ls -A "${INSTALL_DIR}")" ]; then
-      # Initializing repo
       command git init "${INSTALL_DIR}" || {
         echo >&2 'Failed to initialize nvm repo. Please report this!'
         exit 2
@@ -135,26 +111,18 @@ install_nvm_from_git() {
         echo >&2 'Failed to add remote "origin" (or set the URL). Please report this!'
         exit 2
       }
+      command git --git-dir="${INSTALL_DIR}/.git" fetch origin tag "$(nvm_latest_version)" --depth=1 || {
+        echo >&2 'Failed to fetch origin with tags. Please report this!'
+        exit 2
+      }
     else
-      # Cloning repo
-      command git clone "$(nvm_source)" --depth=1 "${INSTALL_DIR}" || {
+      command git -c advice.detachedHead=false clone "$(nvm_source)" -b "$(nvm_latest_version)" --depth=1 "${INSTALL_DIR}" || {
         echo >&2 'Failed to clone nvm repo. Please report this!'
         exit 2
       }
     fi
   fi
-  # Try to fetch tag
-  if command git --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" fetch origin tag "$NVM_VERSION" --depth=1 2>/dev/null; then
-    :
-  # Fetch given version
-  elif ! command git --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" fetch origin "$NVM_VERSION" --depth=1; then
-    echo >&2 "$fetch_error"
-    exit 1
-  fi
-  command git -c advice.detachedHead=false --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" checkout -f --quiet FETCH_HEAD || {
-    echo >&2 "Failed to checkout the given version $NVM_VERSION. Please report this!"
-    exit 2
-  }
+  command git -c advice.detachedHead=false --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" checkout -f --quiet "$(nvm_latest_version)"
   if [ -n "$(command git --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" show-ref refs/heads/master)" ]; then
     if command git --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" branch --quiet 2>/dev/null; then
       command git --git-dir="$INSTALL_DIR"/.git --work-tree="$INSTALL_DIR" branch --quiet -D master >/dev/null 2>&1
@@ -292,9 +260,7 @@ nvm_detect_profile() {
 # Node, and warn them if so.
 #
 nvm_check_global_modules() {
-  local NPM_COMMAND
-  NPM_COMMAND="$(command -v npm 2>/dev/null)" || return 0
-  [ -n "${NVM_DIR}" ] && [ -z "${NPM_COMMAND%%$NVM_DIR/*}" ] && return 0
+  command -v npm >/dev/null 2>&1 || return 0
 
   local NPM_VERSION
   NPM_VERSION="$(npm --version)"
@@ -352,9 +318,7 @@ nvm_do_install() {
   fi
   if [ -z "${METHOD}" ]; then
     # Autodetect install method
-    if nvm_has git; then
-      install_nvm_from_git
-    elif nvm_has nvm_download; then
+    if nvm_has nvm_download; then
       install_nvm_as_script
     else
       echo >&2 'You need git, curl, or wget to install nvm'
@@ -449,7 +413,7 @@ nvm_reset() {
   unset -f nvm_has nvm_install_dir nvm_latest_version nvm_profile_is_bash_or_zsh \
     nvm_source nvm_node_version nvm_download install_nvm_from_git nvm_install_node \
     install_nvm_as_script nvm_try_profile nvm_detect_profile nvm_check_global_modules \
-    nvm_do_install nvm_reset nvm_default_install_dir nvm_grep
+    nvm_do_install nvm_reset nvm_default_install_dir
 }
 
 [ "_$NVM_ENV" = "_testing" ] || nvm_do_install
